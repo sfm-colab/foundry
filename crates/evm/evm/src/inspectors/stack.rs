@@ -1,6 +1,7 @@
 use super::{
-    Cheatcodes, CheatsConfig, ChiselState, CustomPrintTracer, Fuzzer, LineCoverageCollector,
-    LogCollector, RevertDiagnostic, ScriptExecutionInspector, TracingInspector,
+    Cheatcodes, CheatsConfig, ChiselState, Create2Inspector, CustomPrintTracer, Fuzzer,
+    LineCoverageCollector, LogCollector, RevertDiagnostic, ScriptExecutionInspector,
+    TracingInspector,
 };
 use alloy_evm::EvmEnv;
 use alloy_primitives::{
@@ -349,6 +350,9 @@ pub struct InspectorStackInner {
     pub enable_isolation: bool,
     pub networks: NetworkConfigs,
     pub create2_deployer: Address,
+    /// CREATE2 factory inspector. Intercepts CREATE2 frames and redirects them through
+    /// the factory deployer. Currently a no-op placeholder until revm#3518 lands.
+    pub create2_inspector: Create2Inspector,
     /// Flag marking if we are in the inner EVM context.
     pub in_inner_context: bool,
     pub inner_context_data: Option<InnerContextData>,
@@ -551,6 +555,7 @@ impl InspectorStack {
     #[inline]
     pub fn set_create2_deployer(&mut self, deployer: Address) {
         self.create2_deployer = deployer;
+        self.create2_inspector.set_deployer(deployer);
     }
 
     /// Set whether to enable the log collector.
