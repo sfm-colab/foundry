@@ -1487,6 +1487,15 @@ impl EthApi<FoundryNetwork> {
         Ok(highest_gas_limit)
     }
 
+    /// Creates a [`RethReadAdapter`](super::reth_api::RethReadAdapter) backed by this instance's
+    /// backend. Used for POC delegation of read-side `eth_*` methods through reth storage traits.
+    fn reth_read_adapter(
+        &self,
+    ) -> super::reth_api::RethReadAdapter<backend::mem::Backend<FoundryNetwork>> {
+        let chain_spec = Arc::new(reth_chainspec::ChainSpec::default());
+        super::reth_api::RethReadAdapter::new(self.backend.clone(), chain_spec)
+    }
+
     /// Executes the [EthRequest] and returns an RPC [ResponseResult].
     #[allow(clippy::large_stack_frames)]
     pub async fn execute(&self, request: EthRequest) -> ResponseResult {
@@ -1502,7 +1511,9 @@ impl EthApi<FoundryNetwork> {
                 self.get_account_info(addr, block).await.to_rpc_result()
             }
             EthRequest::EthGetBalance(addr, block) => {
-                self.balance(addr, block).await.to_rpc_result()
+                // POC: delegate through reth storage traits
+                let adapter = self.reth_read_adapter();
+                adapter.get_balance(addr, block).map_err(BlockchainError::Message).to_rpc_result()
             }
             EthRequest::EthGetTransactionByHash(hash) => {
                 self.transaction_by_hash(hash).await.to_rpc_result()
@@ -1523,7 +1534,11 @@ impl EthApi<FoundryNetwork> {
             }
             EthRequest::EthBlobBaseFee(_) => self.blob_base_fee().to_rpc_result(),
             EthRequest::EthAccounts(_) => self.accounts().to_rpc_result(),
-            EthRequest::EthBlockNumber(_) => self.block_number().to_rpc_result(),
+            EthRequest::EthBlockNumber(_) => {
+                // POC: delegate through reth storage traits
+                let adapter = self.reth_read_adapter();
+                adapter.block_number().map_err(BlockchainError::Message).to_rpc_result()
+            }
             EthRequest::EthCoinbase(()) => self.author().to_rpc_result(),
             EthRequest::EthGetStorageAt(addr, slot, block) => {
                 self.storage_at(addr, slot, block).await.to_rpc_result()
@@ -1546,7 +1561,12 @@ impl EthApi<FoundryNetwork> {
                 }
             }
             EthRequest::EthGetTransactionCount(addr, block) => {
-                self.transaction_count(addr, block).await.to_rpc_result()
+                // POC: delegate through reth storage traits
+                let adapter = self.reth_read_adapter();
+                adapter
+                    .get_transaction_count(addr, block)
+                    .map_err(BlockchainError::Message)
+                    .to_rpc_result()
             }
             EthRequest::EthGetTransactionCountByHash(hash) => {
                 self.block_transaction_count_by_hash(hash).await.to_rpc_result()

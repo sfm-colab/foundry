@@ -1,5 +1,6 @@
 pub mod api;
 pub mod otterscan;
+pub mod reth_api;
 pub mod sign;
 pub use api::EthApi;
 
