@@ -1239,6 +1239,7 @@ dependencies = [
  "alloy-transport",
  "alloy-trie",
  "anvil-core",
+ "anvil-reth-bridge",
  "anvil-rpc",
  "anvil-server",
  "async-trait",
@@ -1268,6 +1269,8 @@ dependencies = [
  "rand 0.8.5",
  "rand 0.9.4",
  "reqwest 0.13.2",
+ "reth-chainspec 2.0.0",
+ "reth-storage-api 2.0.0",
  "revm",
  "revm-inspectors",
  "serde",
@@ -1324,7 +1327,6 @@ dependencies = [
  "anvil-core",
  "foundry-evm",
  "foundry-primitives",
- "parking_lot",
  "reth-chain-state",
  "reth-chainspec 2.0.0",
  "reth-db-models 2.0.0",
@@ -1339,7 +1341,6 @@ dependencies = [
  "revm",
  "revm-database",
  "tokio",
- "tracing",
 ]
 
 [[package]]

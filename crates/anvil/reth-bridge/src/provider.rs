@@ -1,17 +1,12 @@
 //! `AnvilProvider` — adapts anvil's `Backend` to reth's storage provider traits.
 
-use crate::convert;
+use crate::{backend::BackendView, convert};
 use alloy_consensus::Header;
 use alloy_eips::{BlockHashOrNumber, BlockId, BlockNumHash, BlockNumberOrTag};
 use alloy_primitives::{
     Address, BlockHash, BlockNumber, Bytes, StorageKey, StorageValue, TxHash, TxNumber, B256,
 };
-use anvil::eth::backend::{
-    db::{MaybeFullDatabase, StateDb},
-    mem::Backend,
-};
 use foundry_evm::backend::DatabaseError;
-use foundry_primitives::FoundryNetwork;
 use reth_chain_state::{CanonStateNotifications, CanonStateSubscriptions};
 use reth_chainspec::{ChainInfo, ChainSpecProvider};
 use reth_db_models::StoredBlockBodyIndices;
@@ -45,45 +40,50 @@ use reth_db_models::AccountBeforeTx;
 
 type AnvilBlock = anvil_core::eth::block::Block;
 
-/// Provider that wraps anvil's `Backend` and implements reth's storage traits.
-#[derive(Clone)]
-pub struct AnvilProvider {
-    backend: Arc<Backend<FoundryNetwork>>,
+/// Provider that wraps a [`BackendView`] implementor and implements reth's storage traits.
+pub struct AnvilProvider<B: BackendView> {
+    backend: Arc<B>,
     chain_spec: Arc<reth_chainspec::ChainSpec>,
     canon_state_tx: broadcast::Sender<reth_chain_state::CanonStateNotification<EthPrimitives>>,
 }
 
-impl AnvilProvider {
-    pub fn new(
-        backend: Arc<Backend<FoundryNetwork>>,
-        chain_spec: Arc<reth_chainspec::ChainSpec>,
-    ) -> Self {
+impl<B: BackendView> Clone for AnvilProvider<B> {
+    fn clone(&self) -> Self {
+        Self {
+            backend: self.backend.clone(),
+            chain_spec: self.chain_spec.clone(),
+            canon_state_tx: self.canon_state_tx.clone(),
+        }
+    }
+}
+
+impl<B: BackendView> AnvilProvider<B> {
+    pub fn new(backend: Arc<B>, chain_spec: Arc<reth_chainspec::ChainSpec>) -> Self {
         let (canon_state_tx, _) = broadcast::channel(16);
         Self { backend, chain_spec, canon_state_tx }
     }
 
-    /// Resolve a block hash from the blockchain storage.
+    /// Resolve a block hash from the backend.
     fn resolve_block_hash(&self, id: BlockHashOrNumber) -> Option<B256> {
-        let storage = self.backend.blockchain().storage.read();
         match id {
             BlockHashOrNumber::Hash(h) => {
-                if storage.blocks.contains_key(&h) {
+                if self.backend.has_block(h) {
                     Some(h)
                 } else {
                     None
                 }
             }
-            BlockHashOrNumber::Number(n) => storage.hashes.get(&n).copied(),
+            BlockHashOrNumber::Number(n) => self.backend.number_to_hash(n),
         }
     }
 
     /// Get a block from storage by hash.
     fn get_block(&self, hash: &B256) -> Option<AnvilBlock> {
-        self.backend.blockchain().storage.read().blocks.get(hash).cloned()
+        self.backend.block_by_hash(*hash)
     }
 }
 
-impl fmt::Debug for AnvilProvider {
+impl<B: BackendView> fmt::Debug for AnvilProvider<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnvilProvider").finish_non_exhaustive()
     }
@@ -93,7 +93,7 @@ impl fmt::Debug for AnvilProvider {
 // NodePrimitivesProvider
 // =============================================================================
 
-impl NodePrimitivesProvider for AnvilProvider {
+impl<B: BackendView> NodePrimitivesProvider for AnvilProvider<B> {
     type Primitives = EthPrimitives;
 }
 
@@ -101,9 +101,9 @@ impl NodePrimitivesProvider for AnvilProvider {
 // BlockHashReader
 // =============================================================================
 
-impl BlockHashReader for AnvilProvider {
+impl<B: BackendView> BlockHashReader for AnvilProvider<B> {
     fn block_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
-        Ok(self.backend.blockchain().storage.read().hashes.get(&number).copied())
+        Ok(self.backend.number_to_hash(number))
     }
 
     fn canonical_hashes_range(
@@ -111,11 +111,10 @@ impl BlockHashReader for AnvilProvider {
         start: BlockNumber,
         end: BlockNumber,
     ) -> ProviderResult<Vec<B256>> {
-        let storage = self.backend.blockchain().storage.read();
         let mut hashes = Vec::new();
         for n in start..end {
-            if let Some(h) = storage.hashes.get(&n) {
-                hashes.push(*h);
+            if let Some(h) = self.backend.number_to_hash(n) {
+                hashes.push(h);
             }
         }
         Ok(hashes)
@@ -126,12 +125,11 @@ impl BlockHashReader for AnvilProvider {
 // BlockNumReader
 // =============================================================================
 
-impl BlockNumReader for AnvilProvider {
+impl<B: BackendView> BlockNumReader for AnvilProvider<B> {
     fn chain_info(&self) -> ProviderResult<ChainInfo> {
-        let storage = self.backend.blockchain().storage.read();
         Ok(ChainInfo {
-            best_hash: storage.best_hash,
-            best_number: storage.best_number,
+            best_hash: self.backend.best_hash(),
+            best_number: self.backend.best_number(),
         })
     }
 
@@ -144,8 +142,7 @@ impl BlockNumReader for AnvilProvider {
     }
 
     fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>> {
-        let storage = self.backend.blockchain().storage.read();
-        Ok(storage.blocks.get(&hash).map(|b| b.header.number))
+        Ok(self.backend.block_by_hash(hash).map(|b| b.header.number))
     }
 }
 
@@ -153,26 +150,26 @@ impl BlockNumReader for AnvilProvider {
 // BlockIdReader
 // =============================================================================
 
-impl BlockIdReader for AnvilProvider {
+impl<B: BackendView> BlockIdReader for AnvilProvider<B> {
     fn pending_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
         Ok(None)
     }
 
     fn safe_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
-        let storage = self.backend.blockchain().storage.read();
-        let hash = storage.hash(BlockNumberOrTag::Safe);
+        let hash = self.backend.block_hash(BlockNumberOrTag::Safe);
         hash.map(|h| {
-            let number = storage.blocks.get(&h).map(|b| b.header.number).unwrap_or(0);
+            let number =
+                self.backend.block_by_hash(h).map(|b| b.header.number).unwrap_or(0);
             Ok(BlockNumHash { number, hash: h })
         })
         .transpose()
     }
 
     fn finalized_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
-        let storage = self.backend.blockchain().storage.read();
-        let hash = storage.hash(BlockNumberOrTag::Finalized);
+        let hash = self.backend.block_hash(BlockNumberOrTag::Finalized);
         hash.map(|h| {
-            let number = storage.blocks.get(&h).map(|b| b.header.number).unwrap_or(0);
+            let number =
+                self.backend.block_by_hash(h).map(|b| b.header.number).unwrap_or(0);
             Ok(BlockNumHash { number, hash: h })
         })
         .transpose()
@@ -183,7 +180,7 @@ impl BlockIdReader for AnvilProvider {
 // ChainSpecProvider
 // =============================================================================
 
-impl ChainSpecProvider for AnvilProvider {
+impl<B: BackendView> ChainSpecProvider for AnvilProvider<B> {
     type ChainSpec = reth_chainspec::ChainSpec;
 
     fn chain_spec(&self) -> Arc<Self::ChainSpec> {
@@ -195,7 +192,7 @@ impl ChainSpecProvider for AnvilProvider {
 // HeaderProvider
 // =============================================================================
 
-impl HeaderProvider for AnvilProvider {
+impl<B: BackendView> HeaderProvider for AnvilProvider<B> {
     type Header = Header;
 
     fn header(&self, block_hash: BlockHash) -> ProviderResult<Option<Self::Header>> {
@@ -203,8 +200,7 @@ impl HeaderProvider for AnvilProvider {
     }
 
     fn header_by_number(&self, num: u64) -> ProviderResult<Option<Self::Header>> {
-        let hash = self.backend.blockchain().storage.read().hashes.get(&num).copied();
-        match hash {
+        match self.backend.number_to_hash(num) {
             Some(h) => self.header(h),
             None => Ok(None),
         }
@@ -214,7 +210,7 @@ impl HeaderProvider for AnvilProvider {
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<Self::Header>> {
-        let storage = self.backend.blockchain().storage.read();
+        let best_number = self.backend.best_number();
         let mut headers = Vec::new();
         let start = match range.start_bound() {
             std::ops::Bound::Included(&n) => n,
@@ -224,11 +220,11 @@ impl HeaderProvider for AnvilProvider {
         let end = match range.end_bound() {
             std::ops::Bound::Included(&n) => n + 1,
             std::ops::Bound::Excluded(&n) => n,
-            std::ops::Bound::Unbounded => storage.best_number + 1,
+            std::ops::Bound::Unbounded => best_number + 1,
         };
         for n in start..end {
-            if let Some(h) = storage.hashes.get(&n) {
-                if let Some(block) = storage.blocks.get(h) {
+            if let Some(h) = self.backend.number_to_hash(n) {
+                if let Some(block) = self.backend.block_by_hash(h) {
                     headers.push(block.header.clone());
                 }
             }
@@ -240,10 +236,9 @@ impl HeaderProvider for AnvilProvider {
         &self,
         number: BlockNumber,
     ) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
-        let storage = self.backend.blockchain().storage.read();
-        if let Some(hash) = storage.hashes.get(&number) {
-            if let Some(block) = storage.blocks.get(hash) {
-                return Ok(Some(SealedHeader::new(block.header.clone(), *hash)));
+        if let Some(hash) = self.backend.number_to_hash(number) {
+            if let Some(block) = self.backend.block_by_hash(hash) {
+                return Ok(Some(SealedHeader::new(block.header.clone(), hash)));
             }
         }
         Ok(None)
@@ -254,7 +249,7 @@ impl HeaderProvider for AnvilProvider {
         range: impl RangeBounds<BlockNumber>,
         predicate: impl FnMut(&SealedHeader<Self::Header>) -> bool,
     ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
-        let storage = self.backend.blockchain().storage.read();
+        let best_number = self.backend.best_number();
         let mut predicate = predicate;
         let mut headers = Vec::new();
         let start = match range.start_bound() {
@@ -265,12 +260,12 @@ impl HeaderProvider for AnvilProvider {
         let end = match range.end_bound() {
             std::ops::Bound::Included(&n) => n + 1,
             std::ops::Bound::Excluded(&n) => n,
-            std::ops::Bound::Unbounded => storage.best_number + 1,
+            std::ops::Bound::Unbounded => best_number + 1,
         };
         for n in start..end {
-            if let Some(hash) = storage.hashes.get(&n) {
-                if let Some(block) = storage.blocks.get(hash) {
-                    let sealed = SealedHeader::new(block.header.clone(), *hash);
+            if let Some(hash) = self.backend.number_to_hash(n) {
+                if let Some(block) = self.backend.block_by_hash(hash) {
+                    let sealed = SealedHeader::new(block.header.clone(), hash);
                     if !predicate(&sealed) {
                         break;
                     }
@@ -286,7 +281,7 @@ impl HeaderProvider for AnvilProvider {
 // BlockReader
 // =============================================================================
 
-impl BlockReader for AnvilProvider {
+impl<B: BackendView> BlockReader for AnvilProvider<B> {
     type Block = <EthPrimitives as NodePrimitives>::Block;
 
     fn find_block_by_hash(
@@ -351,12 +346,11 @@ impl BlockReader for AnvilProvider {
         &self,
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<Self::Block>> {
-        let storage = self.backend.blockchain().storage.read();
         let mut blocks = Vec::new();
         for n in range {
-            if let Some(hash) = storage.hashes.get(&n) {
-                if let Some(anvil_block) = storage.blocks.get(hash) {
-                    blocks.push(convert::convert_block(anvil_block).0.into_block());
+            if let Some(hash) = self.backend.number_to_hash(n) {
+                if let Some(anvil_block) = self.backend.block_by_hash(hash) {
+                    blocks.push(convert::convert_block(&anvil_block).0.into_block());
                 }
             }
         }
@@ -374,12 +368,11 @@ impl BlockReader for AnvilProvider {
         &self,
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<RecoveredBlock<Self::Block>>> {
-        let storage = self.backend.blockchain().storage.read();
         let mut blocks = Vec::new();
         for n in range {
-            if let Some(hash) = storage.hashes.get(&n) {
-                if let Some(anvil_block) = storage.blocks.get(hash) {
-                    let (sealed_block, senders) = convert::convert_block(anvil_block);
+            if let Some(hash) = self.backend.number_to_hash(n) {
+                if let Some(anvil_block) = self.backend.block_by_hash(hash) {
+                    let (sealed_block, senders) = convert::convert_block(&anvil_block);
                     blocks.push(RecoveredBlock::new_sealed(sealed_block, senders));
                 }
             }
@@ -392,17 +385,13 @@ impl BlockReader for AnvilProvider {
     }
 }
 
-impl BlockReaderIdExt for AnvilProvider {
+impl<B: BackendView> BlockReaderIdExt for AnvilProvider<B> {
     fn block_by_id(&self, id: BlockId) -> ProviderResult<Option<Self::Block>> {
         match id {
             BlockId::Hash(hash) => self.block(BlockHashOrNumber::Hash(hash.block_hash)),
             BlockId::Number(num) => {
-                let storage = self.backend.blockchain().storage.read();
-                match storage.hash(num) {
-                    Some(h) => {
-                        drop(storage);
-                        self.block(BlockHashOrNumber::Hash(h))
-                    }
+                match self.backend.block_hash(num) {
+                    Some(h) => self.block(BlockHashOrNumber::Hash(h)),
                     None => Ok(None),
                 }
             }
@@ -419,11 +408,10 @@ impl BlockReaderIdExt for AnvilProvider {
                 Ok(block.map(|b| SealedHeader::new(b.header.clone(), hash.block_hash)))
             }
             BlockId::Number(num) => {
-                let storage = self.backend.blockchain().storage.read();
-                match storage.hash(num) {
-                    Some(h) => Ok(storage
-                        .blocks
-                        .get(&h)
+                match self.backend.block_hash(num) {
+                    Some(h) => Ok(self
+                        .backend
+                        .block_by_hash(h)
                         .map(|b| SealedHeader::new(b.header.clone(), h))),
                     None => Ok(None),
                 }
@@ -435,12 +423,8 @@ impl BlockReaderIdExt for AnvilProvider {
         match id {
             BlockId::Hash(hash) => self.header(hash.block_hash),
             BlockId::Number(num) => {
-                let storage = self.backend.blockchain().storage.read();
-                match storage.hash(num) {
-                    Some(h) => {
-                        drop(storage);
-                        self.header(h)
-                    }
+                match self.backend.block_hash(num) {
+                    Some(h) => self.header(h),
                     None => Ok(None),
                 }
             }
@@ -452,7 +436,7 @@ impl BlockReaderIdExt for AnvilProvider {
 // TransactionsProvider
 // =============================================================================
 
-impl TransactionsProvider for AnvilProvider {
+impl<B: BackendView> TransactionsProvider for AnvilProvider<B> {
     type Transaction = <EthPrimitives as NodePrimitives>::SignedTx;
 
     fn transaction_id(&self, _tx_hash: TxHash) -> ProviderResult<Option<TxNumber>> {
@@ -471,9 +455,8 @@ impl TransactionsProvider for AnvilProvider {
     }
 
     fn transaction_by_hash(&self, hash: TxHash) -> ProviderResult<Option<Self::Transaction>> {
-        let storage = self.backend.blockchain().storage.read();
-        if let Some(mined) = storage.transactions.get(&hash) {
-            if let Some(block) = storage.blocks.get(&mined.block_hash) {
+        if let Some(mined) = self.backend.mined_transaction_by_hash(hash) {
+            if let Some(block) = self.backend.block_by_hash(mined.block_hash) {
                 if let Some(tx) = block.body.transactions.get(mined.info.transaction_index as usize)
                 {
                     if let Some((reth_tx, _)) = convert::convert_tx(tx) {
@@ -489,9 +472,8 @@ impl TransactionsProvider for AnvilProvider {
         &self,
         hash: TxHash,
     ) -> ProviderResult<Option<(Self::Transaction, TransactionMeta)>> {
-        let storage = self.backend.blockchain().storage.read();
-        if let Some(mined) = storage.transactions.get(&hash) {
-            if let Some(block) = storage.blocks.get(&mined.block_hash) {
+        if let Some(mined) = self.backend.mined_transaction_by_hash(hash) {
+            if let Some(block) = self.backend.block_by_hash(mined.block_hash) {
                 if let Some(tx) = block.body.transactions.get(mined.info.transaction_index as usize)
                 {
                     if let Some((reth_tx, _)) = convert::convert_tx(tx) {
@@ -520,8 +502,7 @@ impl TransactionsProvider for AnvilProvider {
             Some(h) => h,
             None => return Ok(None),
         };
-        let storage = self.backend.blockchain().storage.read();
-        if let Some(block) = storage.blocks.get(&hash) {
+        if let Some(block) = self.backend.block_by_hash(hash) {
             let txs: Vec<_> = block
                 .body
                 .transactions
@@ -563,7 +544,7 @@ impl TransactionsProvider for AnvilProvider {
 // ReceiptProvider
 // =============================================================================
 
-impl ReceiptProvider for AnvilProvider {
+impl<B: BackendView> ReceiptProvider for AnvilProvider<B> {
     type Receipt = <EthPrimitives as NodePrimitives>::Receipt;
 
     fn receipt(&self, _id: TxNumber) -> ProviderResult<Option<Self::Receipt>> {
@@ -571,9 +552,8 @@ impl ReceiptProvider for AnvilProvider {
     }
 
     fn receipt_by_hash(&self, hash: TxHash) -> ProviderResult<Option<Self::Receipt>> {
-        let storage = self.backend.blockchain().storage.read();
-        if let Some(mined) = storage.transactions.get(&hash) {
-            return Ok(convert::convert_receipt(&mined.receipt));
+        if let Some(mined) = self.backend.mined_transaction_by_hash(hash) {
+            return Ok(convert::convert_receipt_view(&mined.receipt));
         }
         Ok(None)
     }
@@ -586,23 +566,19 @@ impl ReceiptProvider for AnvilProvider {
             Some(h) => h,
             None => return Ok(None),
         };
-        let storage = self.backend.blockchain().storage.read();
-        if let Some(anvil_block) = storage.blocks.get(&hash) {
-            let receipts: Vec<_> = anvil_block
-                .body
-                .transactions
-                .iter()
-                .filter_map(|tx| {
-                    let tx_hash = tx.hash();
-                    storage
-                        .transactions
-                        .get(&tx_hash)
-                        .and_then(|mined| convert::convert_receipt(&mined.receipt))
-                })
-                .collect();
-            return Ok(Some(receipts));
+        let tx_hashes = self.backend.block_transaction_hashes(hash);
+        if tx_hashes.is_empty() && !self.backend.has_block(hash) {
+            return Ok(None);
         }
-        Ok(None)
+        let receipts: Vec<_> = tx_hashes
+            .iter()
+            .filter_map(|tx_hash| {
+                self.backend
+                    .mined_transaction_by_hash(*tx_hash)
+                    .and_then(|mined| convert::convert_receipt_view(&mined.receipt))
+            })
+            .collect();
+        Ok(Some(receipts))
     }
 
     fn receipts_by_tx_range(
@@ -620,13 +596,13 @@ impl ReceiptProvider for AnvilProvider {
     }
 }
 
-impl ReceiptProviderIdExt for AnvilProvider {}
+impl<B: BackendView> ReceiptProviderIdExt for AnvilProvider<B> {}
 
 // =============================================================================
 // AccountReader
 // =============================================================================
 
-impl AccountReader for AnvilProvider {
+impl<B: BackendView> AccountReader for AnvilProvider<B> {
     fn basic_account(&self, _address: &Address) -> ProviderResult<Option<Account>> {
         Ok(None)
     }
@@ -636,7 +612,7 @@ impl AccountReader for AnvilProvider {
 // ChangeSetReader
 // =============================================================================
 
-impl ChangeSetReader for AnvilProvider {
+impl<B: BackendView> ChangeSetReader for AnvilProvider<B> {
     fn account_block_changeset(
         &self,
         _block_number: BlockNumber,
@@ -664,18 +640,11 @@ impl ChangeSetReader for AnvilProvider {
 // StateProviderFactory
 // =============================================================================
 
-impl StateProviderFactory for AnvilProvider {
+impl<B: BackendView> StateProviderFactory for AnvilProvider<B> {
     fn latest(&self) -> ProviderResult<StateProviderBox> {
-        let db = self.backend.get_db();
-        match db.try_read() {
-            Ok(guard) => {
-                let state = guard.current_state();
-                Ok(Box::new(AnvilStateProvider(state)))
-            }
-            Err(_) => Err(ProviderError::other(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "db read lock busy",
-            ))),
+        match self.backend.latest_state() {
+            Ok(state) => Ok(Box::new(AnvilStateProvider::new(state))),
+            Err(e) => Err(ProviderError::other(e)),
         }
     }
 
@@ -700,8 +669,7 @@ impl StateProviderFactory for AnvilProvider {
     }
 
     fn history_by_block_number(&self, block: BlockNumber) -> ProviderResult<StateProviderBox> {
-        let hash = self.backend.blockchain().storage.read().hashes.get(&block).copied();
-        match hash {
+        match self.backend.number_to_hash(block) {
             Some(h) => self.history_by_block_hash(h),
             None => Err(ProviderError::BlockHashNotFound(B256::ZERO)),
         }
@@ -712,13 +680,11 @@ impl StateProviderFactory for AnvilProvider {
             return self.latest();
         }
 
-        let states = self.backend.states().read();
-        if let Some(state) = states.get_state(&block) {
-            return Ok(Box::new(AnvilStateProvider::from_state_db_ref(state)));
+        match self.backend.state_by_block_hash(block) {
+            Ok(Some(state)) => Ok(Box::new(AnvilStateProvider::new(state))),
+            Ok(None) => Err(ProviderError::StateForHashNotFound(block)),
+            Err(e) => Err(ProviderError::other(e)),
         }
-        drop(states);
-
-        Err(ProviderError::StateForHashNotFound(block))
     }
 
     fn state_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox> {
@@ -745,7 +711,7 @@ impl StateProviderFactory for AnvilProvider {
 // StateReader
 // =============================================================================
 
-impl StateReader for AnvilProvider {
+impl<B: BackendView> StateReader for AnvilProvider<B> {
     type Receipt = <EthPrimitives as NodePrimitives>::Receipt;
 
     fn get_state(
@@ -760,7 +726,7 @@ impl StateReader for AnvilProvider {
 // StageCheckpointReader
 // =============================================================================
 
-impl StageCheckpointReader for AnvilProvider {
+impl<B: BackendView> StageCheckpointReader for AnvilProvider<B> {
     fn get_stage_checkpoint(&self, _id: StageId) -> ProviderResult<Option<StageCheckpoint>> {
         Ok(None)
     }
@@ -778,7 +744,7 @@ impl StageCheckpointReader for AnvilProvider {
 // BlockBodyIndicesProvider
 // =============================================================================
 
-impl BlockBodyIndicesProvider for AnvilProvider {
+impl<B: BackendView> BlockBodyIndicesProvider for AnvilProvider<B> {
     fn block_body_indices(
         &self,
         _num: u64,
@@ -798,34 +764,28 @@ impl BlockBodyIndicesProvider for AnvilProvider {
 // CanonStateSubscriptions
 // =============================================================================
 
-impl CanonStateSubscriptions for AnvilProvider {
+impl<B: BackendView> CanonStateSubscriptions for AnvilProvider<B> {
     fn subscribe_to_canonical_state(&self) -> CanonStateNotifications<Self::Primitives> {
         self.canon_state_tx.subscribe()
     }
 }
 
 // =============================================================================
-// AnvilStateProvider — wraps a StateDb snapshot for sync StateProvider access
+// AnvilStateProvider — wraps a BackendView::State for sync StateProvider access
 // =============================================================================
 
-/// Wraps an anvil `StateDb` to implement reth's `StateProvider`.
-pub struct AnvilStateProvider(StateDb);
+/// Wraps a state snapshot implementing `DatabaseRef` to implement reth's `StateProvider`.
+pub struct AnvilStateProvider<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync>(S);
 
-impl AnvilStateProvider {
-    pub fn new(state: StateDb) -> Self {
+impl<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync> AnvilStateProvider<S> {
+    pub fn new(state: S) -> Self {
         Self(state)
-    }
-
-    /// Create from a `StateDb` reference by cloning its state snapshot.
-    pub fn from_state_db_ref(state: &StateDb) -> Self {
-        let snapshot = state.read_as_state_snapshot();
-        let mut new_state = StateDb::new(foundry_evm::backend::MemDb::default());
-        new_state.init_from_state_snapshot(snapshot);
-        Self(new_state)
     }
 }
 
-impl fmt::Debug for AnvilStateProvider {
+impl<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync> fmt::Debug
+    for AnvilStateProvider<S>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnvilStateProvider").finish_non_exhaustive()
     }
@@ -835,7 +795,9 @@ fn db_err_to_provider(e: DatabaseError) -> ProviderError {
     ProviderError::other(e)
 }
 
-impl BlockHashReader for AnvilStateProvider {
+impl<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync> BlockHashReader
+    for AnvilStateProvider<S>
+{
     fn block_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
         match self.0.block_hash_ref(number) {
             Ok(h) if h == B256::ZERO => Ok(None),
@@ -853,7 +815,9 @@ impl BlockHashReader for AnvilStateProvider {
     }
 }
 
-impl AccountReader for AnvilStateProvider {
+impl<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync> AccountReader
+    for AnvilStateProvider<S>
+{
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
         match self.0.basic_ref(*address) {
             Ok(Some(info)) => Ok(Some(Account {
@@ -871,7 +835,9 @@ impl AccountReader for AnvilStateProvider {
     }
 }
 
-impl BytecodeReader for AnvilStateProvider {
+impl<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync> BytecodeReader
+    for AnvilStateProvider<S>
+{
     fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
         if *code_hash == revm::primitives::KECCAK_EMPTY {
             return Ok(None);
@@ -883,7 +849,9 @@ impl BytecodeReader for AnvilStateProvider {
     }
 }
 
-impl StateProvider for AnvilStateProvider {
+impl<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync> StateProvider
+    for AnvilStateProvider<S>
+{
     fn storage(
         &self,
         account: Address,
@@ -899,7 +867,9 @@ impl StateProvider for AnvilStateProvider {
 
 // Noop trie/proof impls required by StateProvider supertrait bounds
 
-impl StateRootProvider for AnvilStateProvider {
+impl<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync> StateRootProvider
+    for AnvilStateProvider<S>
+{
     fn state_root(&self, _state: HashedPostState) -> ProviderResult<B256> {
         Ok(B256::ZERO)
     }
@@ -923,7 +893,9 @@ impl StateRootProvider for AnvilStateProvider {
     }
 }
 
-impl StorageRootProvider for AnvilStateProvider {
+impl<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync> StorageRootProvider
+    for AnvilStateProvider<S>
+{
     fn storage_root(
         &self,
         _address: Address,
@@ -951,7 +923,9 @@ impl StorageRootProvider for AnvilStateProvider {
     }
 }
 
-impl StateProofProvider for AnvilStateProvider {
+impl<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync> StateProofProvider
+    for AnvilStateProvider<S>
+{
     fn proof(
         &self,
         _input: TrieInput,
@@ -979,7 +953,9 @@ impl StateProofProvider for AnvilStateProvider {
     }
 }
 
-impl HashedPostStateProvider for AnvilStateProvider {
+impl<S: DatabaseRef<Error = DatabaseError> + fmt::Debug + Send + Sync> HashedPostStateProvider
+    for AnvilStateProvider<S>
+{
     fn hashed_post_state(
         &self,
         _bundle_state: &revm_database::BundleState,

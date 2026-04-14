@@ -1,11 +1,9 @@
 //! Type conversion between anvil's types and reth's `EthPrimitives`.
 
+use crate::backend::ReceiptView;
 use alloy_consensus::TxEnvelope;
 use alloy_primitives::Address;
-use anvil_core::eth::{
-    block::Block as AnvilBlock,
-    transaction::MaybeImpersonatedTransaction,
-};
+use anvil_core::eth::{block::Block as AnvilBlock, transaction::MaybeImpersonatedTransaction};
 use foundry_primitives::{FoundryReceiptEnvelope, FoundryTxEnvelope};
 use reth_ethereum_primitives::{
     Block as RethBlock, BlockBody as RethBlockBody, Receipt as RethReceipt, TransactionSigned,
@@ -27,26 +25,29 @@ pub fn convert_tx(
     Some((reth_tx, sender))
 }
 
+/// Converts a receipt implementing [`ReceiptView`] to reth's `Receipt`.
+///
+/// Returns `None` for non-standard receipt types (Deposit, Tempo).
+pub fn convert_receipt_view<R: ReceiptView>(receipt: &R) -> Option<RethReceipt> {
+    let tx_type = receipt.tx_type()?;
+    Some(RethReceipt {
+        tx_type,
+        success: receipt.success(),
+        cumulative_gas_used: receipt.cumulative_gas_used(),
+        logs: receipt.logs(),
+    })
+}
+
 /// Converts a `FoundryReceiptEnvelope` to reth's `Receipt`.
 ///
 /// Returns `None` for Deposit and Tempo receipts.
 pub fn convert_receipt(receipt: &FoundryReceiptEnvelope) -> Option<RethReceipt> {
     let (tx_type, inner) = match receipt {
-        FoundryReceiptEnvelope::Legacy(r) => {
-            (alloy_consensus::TxType::Legacy, &r.receipt)
-        }
-        FoundryReceiptEnvelope::Eip2930(r) => {
-            (alloy_consensus::TxType::Eip2930, &r.receipt)
-        }
-        FoundryReceiptEnvelope::Eip1559(r) => {
-            (alloy_consensus::TxType::Eip1559, &r.receipt)
-        }
-        FoundryReceiptEnvelope::Eip4844(r) => {
-            (alloy_consensus::TxType::Eip4844, &r.receipt)
-        }
-        FoundryReceiptEnvelope::Eip7702(r) => {
-            (alloy_consensus::TxType::Eip7702, &r.receipt)
-        }
+        FoundryReceiptEnvelope::Legacy(r) => (alloy_consensus::TxType::Legacy, &r.receipt),
+        FoundryReceiptEnvelope::Eip2930(r) => (alloy_consensus::TxType::Eip2930, &r.receipt),
+        FoundryReceiptEnvelope::Eip1559(r) => (alloy_consensus::TxType::Eip1559, &r.receipt),
+        FoundryReceiptEnvelope::Eip4844(r) => (alloy_consensus::TxType::Eip4844, &r.receipt),
+        FoundryReceiptEnvelope::Eip7702(r) => (alloy_consensus::TxType::Eip7702, &r.receipt),
         FoundryReceiptEnvelope::Deposit(_) | FoundryReceiptEnvelope::Tempo(_) => return None,
     };
 

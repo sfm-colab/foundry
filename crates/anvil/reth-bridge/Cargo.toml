@@ -14,7 +14,6 @@ workspace = true
 
 [dependencies]
 # foundry
-anvil = { path = ".." }
 anvil-core = { path = "../core" }
 foundry-evm = { path = "../../evm/evm" }
 foundry-primitives = { path = "../../primitives" }
@@ -43,11 +42,10 @@ revm.workspace = true
 revm-database = "12.0.0"
 
 # misc
-parking_lot.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-tracing.workspace = true
 
 [dev-dependencies]
+anvil = { path = ".." }
 tokio = { workspace = true, features = ["full"] }
 alloy-rpc-types.workspace = true
 alloy-serde.workspace = true

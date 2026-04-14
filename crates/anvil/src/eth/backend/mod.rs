@@ -15,3 +15,4 @@ pub mod info;
 pub mod notifications;
 pub mod tempo;
 pub mod validate;
+pub mod view;
