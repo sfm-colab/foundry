@@ -66,9 +66,9 @@ alloy-genesis.workspace = true
 alloy-trie.workspace = true
 op-alloy-consensus = { workspace = true, features = ["serde"] }
 
-# reth (path deps to local checkout)
-reth-chainspec = { path = "/Users/gustavo/dev/forks/reth/crates/chainspec" }
-reth-storage-api = { path = "/Users/gustavo/dev/forks/reth/crates/storage/storage-api" }
+# reth
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "c20d897ef" }
+reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "c20d897ef" }
 
 # revm
 revm = { workspace = true, features = [
