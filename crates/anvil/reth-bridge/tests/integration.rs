@@ -1,8 +1,9 @@
 //! Smoke tests: spin up anvil, create AnvilProvider, verify reads work.
 
 use anvil::{spawn, NodeConfig};
-use anvil_reth_bridge::{AnvilProvider, AnvilStateProvider};
-use reth_primitives_traits::Block as _;
+use anvil::eth::backend::mem::Backend;
+use anvil_reth_bridge::AnvilProvider;
+use foundry_primitives::FoundryNetwork;
 use reth_storage_api::{
     AccountReader, BlockNumReader, BlockReader, HeaderProvider, ReceiptProvider,
     StateProviderFactory, TransactionsProvider,
@@ -10,8 +11,8 @@ use reth_storage_api::{
 use std::sync::Arc;
 
 fn make_provider(
-    backend: Arc<anvil::eth::backend::mem::Backend<foundry_primitives::FoundryNetwork>>,
-) -> AnvilProvider {
+    backend: Arc<Backend<FoundryNetwork>>,
+) -> AnvilProvider<Backend<FoundryNetwork>> {
     let chain_spec = Arc::new(reth_chainspec::ChainSpec::default());
     AnvilProvider::new(backend, chain_spec)
 }
