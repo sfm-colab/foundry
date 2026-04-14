@@ -69,6 +69,11 @@ op-alloy-consensus = { workspace = true, features = ["serde"] }
 # reth
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "c20d897ef" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "c20d897ef" }
+reth-storage-errors = { git = "https://github.com/paradigmxyz/reth", rev = "c20d897ef" }
+reth-rpc = { git = "https://github.com/paradigmxyz/reth", rev = "c20d897ef" }
+reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", rev = "c20d897ef" }
+reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "c20d897ef" }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "c20d897ef" }
 
 # revm
 revm = { workspace = true, features = [
