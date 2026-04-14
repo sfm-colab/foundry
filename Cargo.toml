@@ -3,6 +3,7 @@ members = [
     "benches/",
     "crates/anvil/",
     "crates/anvil/core/",
+    "crates/anvil/reth-bridge/",
     "crates/anvil/rpc/",
     "crates/anvil/server/",
     "crates/cast/",

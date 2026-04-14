@@ -1,0 +1,53 @@
+[package]
+name = "anvil-reth-bridge"
+description = "Bridge between anvil's in-memory backend and reth's RPC trait interfaces"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# foundry
+anvil = { path = ".." }
+anvil-core = { path = "../core" }
+foundry-evm = { path = "../../evm/evm" }
+foundry-primitives = { path = "../../primitives" }
+
+# reth (path deps to local checkout)
+reth-storage-api = { path = "/Users/gustavo/dev/forks/reth/crates/storage/storage-api" }
+reth-chain-state = { path = "/Users/gustavo/dev/forks/reth/crates/chain-state" }
+reth-chainspec = { path = "/Users/gustavo/dev/forks/reth/crates/chainspec" }
+reth-primitives-traits = "0.2.0"
+reth-ethereum-primitives = { path = "/Users/gustavo/dev/forks/reth/crates/ethereum/primitives" }
+reth-trie-common = { path = "/Users/gustavo/dev/forks/reth/crates/trie/common" }
+reth-stages-types = { path = "/Users/gustavo/dev/forks/reth/crates/stages/types" }
+reth-network-api = { path = "/Users/gustavo/dev/forks/reth/crates/net/network-api" }
+reth-storage-errors = { path = "/Users/gustavo/dev/forks/reth/crates/storage/errors" }
+reth-db-models = { path = "/Users/gustavo/dev/forks/reth/crates/storage/db-models" }
+reth-execution-types = { path = "/Users/gustavo/dev/forks/reth/crates/evm/execution-types" }
+
+# alloy
+alloy-consensus = { workspace = true, features = ["k256"] }
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-network.workspace = true
+
+# revm
+revm.workspace = true
+revm-database = "12.0.0"
+
+# misc
+parking_lot.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+alloy-rpc-types.workspace = true
+alloy-serde.workspace = true

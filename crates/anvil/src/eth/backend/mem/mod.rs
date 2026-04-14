@@ -330,6 +330,16 @@ impl<N: Network> Backend<N> {
         &self.db
     }
 
+    /// Returns a reference to the blockchain storage
+    pub fn blockchain(&self) -> &Blockchain<N> {
+        &self.blockchain
+    }
+
+    /// Returns a reference to the historical block states
+    pub fn states(&self) -> &Arc<RwLock<InMemoryBlockStates>> {
+        &self.states
+    }
+
     /// Returns the `AccountInfo` from the database
     pub async fn get_account(&self, address: Address) -> DatabaseResult<AccountInfo> {
         Ok(self.db.read().await.basic_ref(address)?.unwrap_or_default())
